@@ -69,7 +69,8 @@ add_executable(
   ${ONNXSIM_WASM_INTERFACE})
 set_target_properties(onnxsim_bin PROPERTIES OUTPUT_NAME onnxsim)
 if (EMSCRIPTEN)
-  set_target_properties(onnxsim_bin PROPERTIES LINK_FLAGS "-s ALLOW_MEMORY_GROWTH=1 -s EXIT_RUNTIME=1 -s FORCE_FILESYSTEM=1 -s MODULARIZE=1 -s 'EXPORT_NAME=\"create_onnxsim\"' -s 'EXPORTED_RUNTIME_METHODS=[onnxsimplify_export,ENV]' -Wl,--threads=8 -Wl,--lto-partitions=8 -Wl,--lto-O0 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sASSERTIONS=2")
+  set_target_properties(onnxsim_bin PROPERTIES LINK_FLAGS "-s ALLOW_MEMORY_GROWTH=1 -s EXIT_RUNTIME=0 -s FORCE_FILESYSTEM=1 -s MODULARIZE=1 -s 'EXPORT_NAME=\"create_onnxsim\"' -s 
+  'EXPORTED_RUNTIME_METHODS=[ENV]' -Wl,--threads=8 -Wl,--lto-partitions=8 -Wl,--lto-O0 -Wl,--lto-CGO0 -s ERROR_ON_UNDEFINED_SYMBOLS=0 -sASSERTIONS=2 -sINVOKE_RUN=0")
   target_link_libraries(onnxsim_bin embind "-Wl,--whole-archive" onnxsim "-Wl,--no-whole-archive")
 else()
   target_link_libraries(onnxsim_bin onnxsim)

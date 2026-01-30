@@ -49,7 +49,7 @@ jobs:
           ./emsdk/emsdk install ${EMSCRIPTEN_VERSION}
           ./emsdk/emsdk activate ${EMSCRIPTEN_VERSION}
           . ./emsdk/emsdk_env.sh
-          EMPROFILE=2 ./build_wasm.sh
+          EMPROFILE=1 ./build_wasm.sh
           rm scripts/convertmodel/onnxsim.*
           cp build-wasm-node-OFF/onnxsim.* scripts/convertmodel
       - name: Upload artifact
