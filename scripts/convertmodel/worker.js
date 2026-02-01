@@ -27,6 +27,9 @@ create_onnxsim({
             postMessage(["stderr", "simplify failed!"]);
             return;
         }
-        postMessage(["convert-done", simplify_result]);
+        console.log("to data url start")
+        const data_url = "data:application/octet-stream;base64," + simplify_result.toBase64();
+        console.log("to data url end")
+        postMessage(["convert-done", data_url]);
     });
 });

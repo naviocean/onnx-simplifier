@@ -17,11 +17,9 @@
                             log_output.textContent += e.data[1] + "\n";
                             break;
                         case "convert-done":
-                            console.log("to data url start")
-                            const data_url = "data:application/octet-stream;base64," + e.data[1].toBase64();
-                            console.log("to data url end")
                             input.disabled = false;
                             dl_btn.disabled = false;
+                            const data_url = e.data[1];
                             dl_btn.onclick = () => {
                                 const a = document.createElement("a");
                                 a.href = data_url;
