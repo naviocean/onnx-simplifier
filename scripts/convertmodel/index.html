@@ -55,14 +55,14 @@
                 input.addEventListener("change", async (e) => {
                     const file = e.target.files[0];
                     if (!file) return;
-                    result_name = (file.name.endsWith(".onnx") ? file.name.substring(0, file.name.length - 5) : file.name) + ".simplified.onnx"
+                    const optimizer = document.querySelector('input[name="optimizer"]:checked').value;
+                    result_name = (file.name.endsWith(".onnx") ? file.name.substring(0, file.name.length - 5) : file.name) + "." + optimizer + ".onnx"
 
                     input.disabled = true;
                     dl_btn.disabled = true;
                     const buf = await file.arrayBuffer();
                     console.log("sending: ", file.name);
                     const passes = Array.from(document.querySelectorAll('input[class="pass"]:checked')).map((v) => v.name);
-                    const optimizer = document.querySelector('input[name="optimizer"]:checked').value;
                     worker.postMessage([optimizer, buf, passes], [buf]);
                 });
             };
