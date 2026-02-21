@@ -60,7 +60,7 @@ try:
 except (OSError, subprocess.CalledProcessError):
     dev_count = None
 
-if os.getenv('ONNXSIM_SDIST_RELEASE') is not None:
+if os.getenv('ONNXSIM_RELEASE') is not None:
     version = '0.0.0'
     git_version = None
     dev_count = None
@@ -103,6 +103,7 @@ class create_version(ONNXCommand):
 
             version = '{version}'
             git_version = '{git_version}'
+            dev_count = {dev_count}
             '''.format(**dict(VersionInfo._asdict()))))
 
 
