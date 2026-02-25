@@ -100,7 +100,7 @@ NB_MODULE(onnxsim_cpp2py_export, m) {
       .def("_set_model_executor",
            [](std::shared_ptr<PyModelExecutor> executor) {
              ModelExecutor::set_instance(std::move(executor));
-           });
+           }, "executor"_a.none());
 
   py::class_<PyModelExecutor, PyModelExecutorTrampoline>(m, "ModelExecutor")
       .def(py::init<>())
