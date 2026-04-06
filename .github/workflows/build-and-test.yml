@@ -32,7 +32,7 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, macos-15]
         py_ver: [cp310, cp312, cp313]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         submodules: recursive
         fetch-depth: 0
@@ -69,7 +69,7 @@ jobs:
       CMAKE_GENERATOR: Ninja
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         submodules: recursive
         fetch-depth: 0
