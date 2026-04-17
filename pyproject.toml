@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/daquexian/onnx-simplifier"
+Homepage = "https://github.com/onnxsim/onnxsim"
 
 [project.scripts]
 onnxsim = "onnxsim:main"
