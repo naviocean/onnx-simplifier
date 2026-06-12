@@ -138,7 +138,7 @@ class cmake_build(setuptools.Command):
             os.makedirs(CMAKE_BUILD_DIR)
 
         with cd(CMAKE_BUILD_DIR):
-            build_type = 'Release'
+            build_type = 'RelWithDebInfo'
             # configure
             cmake_args = [
                 CMAKE,

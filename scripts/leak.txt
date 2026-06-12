@@ -1,0 +1,3 @@
+leak:libtorch
+leak:numpy/_core
+leak:PyThread_allocate_lock
