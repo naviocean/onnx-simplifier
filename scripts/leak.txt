@@ -1,3 +1,6 @@
+leak:libcrypt
 leak:libtorch
 leak:numpy/_core
+leak:onnxruntime_pybind11_state
+leak:onnx_cpp2py_export
 leak:PyThread_allocate_lock
