@@ -204,3 +204,35 @@ def test_unfoldable_const_node_keeps_topological_order():
     onnx.checker.check_model(sim_model)
     op_types = [n.op_type for n in sim_model.graph.node]
     assert op_types.index("SequenceEmpty") < op_types.index("SequenceInsert")
+
+
+def test_folding_does_not_duplicate_initializers():
+    # Folding a const op that reads a weight (here a Transpose on an initializer)
+    # produces a new initializer for the result but must not leave the original
+    # operand initializer dangling in the graph. Otherwise the weight data is
+    # duplicated, which can push a large model past onnx's 2GB protobuf limit
+    # before the optimizer runs (issue #174).
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [3, 4])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [3, 4])
+    w = helper.make_tensor("w", TensorProto.FLOAT, [4, 3], list(range(12)))
+    nodes = [
+        helper.make_node("Transpose", ["w"], ["wt"], perm=[1, 0]),
+        helper.make_node("Add", ["x", "wt"], ["y"]),
+    ]
+    graph = helper.make_graph(nodes, "g", [x], [y], initializer=[w])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+
+    # Disable the onnx optimizer so the constant folding logic alone is
+    # responsible for cleaning up the dangling initializer.
+    sim_model, check_ok = onnxsim.simplify(model, perform_optimization=False)
+    assert check_ok
+    onnx.checker.check_model(sim_model)
+
+    # The Transpose is folded away, and the original weight "w" must not survive
+    # as an unused initializer alongside the folded result.
+    assert all(n.op_type != "Transpose" for n in sim_model.graph.node)
+    used = {i for n in sim_model.graph.node for i in n.input}
+    for init in sim_model.graph.initializer:
+        assert init.name in used, f"unused initializer left behind: {init.name}"
+    assert "w" not in {init.name for init in sim_model.graph.initializer}
