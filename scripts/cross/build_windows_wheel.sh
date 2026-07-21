@@ -265,6 +265,7 @@ python_args=(
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" -G Ninja \
   "${TOOLCHAIN_ARGS[@]}" \
+  -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES="${REPO_ROOT}/scripts/cross/find_python_early.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
   -DONNX_BUILD_PYTHON=ON \
   -DONNX_INSTALL=OFF \
