@@ -262,7 +262,8 @@ fi
 
 NANOBIND_CMAKE_DIR="$(python3 -m nanobind --cmake_dir)"
 
-BUILD_DIR="${WORK}/onnxsim-build-${PYVER}$([[ "${ABI3}" == "1" ]] && echo -abi3)"
+BUILD_DIR="${WORK}/onnxsim-build-${PYVER}"
+if [[ "${ABI3}" == "1" ]]; then BUILD_DIR="${BUILD_DIR}-abi3"; fi
 rm -rf "${BUILD_DIR}"
 
 HOSTPY="$(command -v python3)"
