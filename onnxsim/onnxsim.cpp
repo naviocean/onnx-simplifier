@@ -442,6 +442,193 @@ onnx::ModelProto _InferShapes(const onnx::ModelProto& model) {
   return result;
 }
 
+// Build a lookup from tensor name to its type, gathering shapes from every
+// place a shape can be declared: value_info (populated by shape inference),
+// graph inputs and graph outputs. Pointers reference `model`, so the map must
+// not outlive it and `model` must not be mutated while the map is in use.
+std::unordered_map<std::string, const onnx::TypeProto*> BuildTypeMap(
+    const onnx::ModelProto& model) {
+  std::unordered_map<std::string, const onnx::TypeProto*> type_map;
+  auto add = [&type_map](const onnx::ValueInfoProto& vi) {
+    if (vi.has_type()) {
+      type_map[vi.name()] = &vi.type();
+    }
+  };
+  for (const auto& vi : model.graph().value_info()) add(vi);
+  for (const auto& vi : model.graph().input()) add(vi);
+  for (const auto& vi : model.graph().output()) add(vi);
+  return type_map;
+}
+
+// Fetch the element type and a fully static shape of `name` from `type_map`.
+// Returns false unless the tensor has a known integer (INT64/INT32) element
+// type and a shape whose every dimension is a fixed value. A rank-0 (scalar)
+// tensor yields an empty `dims` (element count 1).
+bool GetStaticIntTensorInfo(
+    const std::unordered_map<std::string, const onnx::TypeProto*>& type_map,
+    const std::string& name, onnx::TensorProto::DataType& elem_type,
+    std::vector<int64_t>& dims) {
+  auto iter = type_map.find(name);
+  if (iter == type_map.end() || !iter->second->has_tensor_type()) {
+    return false;
+  }
+  const auto& tensor_type = iter->second->tensor_type();
+  elem_type = static_cast<onnx::TensorProto::DataType>(tensor_type.elem_type());
+  if (elem_type != onnx::TensorProto::INT64 &&
+      elem_type != onnx::TensorProto::INT32) {
+    return false;
+  }
+  if (!tensor_type.has_shape()) {
+    // Rank is unknown.
+    return false;
+  }
+  dims.clear();
+  for (const auto& dim : tensor_type.shape().dim()) {
+    if (!dim.has_dim_value()) {
+      return false;
+    }
+    dims.push_back(dim.dim_value());
+  }
+  return true;
+}
+
+// Partial shape evaluation (issue #139) via ONNX data propagation.
+//
+// The plain constant folder only folds a node when *all* of its inputs are
+// constant, so shape-computing ops like `Shape` are never folded: their input
+// is an activation. Yet those ops depend solely on shapes, which shape
+// inference knows -- fully or partially -- even when some dimensions stay
+// dynamic.
+//
+// ONNX shape inference can *propagate* those partially known values: with data
+// propagation enabled it fills a DataValueMap mapping each tensor to a
+// TensorShapeProto whose entries are either a concrete dim_value or a symbolic
+// dim_param. Ops across the shape family (Shape, Gather, Slice, Concat,
+// Squeeze/Unsqueeze, Cast, Add/Sub/Mul, ...) participate, so a chain like
+//   Shape([batch, C, H, W]) -> Gather([1, 2, 3])  ==>  [C, H, W]
+// is propagated end to end and comes out fully concrete even though the batch
+// dimension stays dynamic (the mask-rcnn pattern from issue #139).
+//
+// This pass rewrites every node whose lone output has a fully concrete
+// propagated value into a `Constant` node. Downstream ops then fold through the
+// ordinary constant folder, and now-dead nodes are removed by the optimizer.
+onnx::ModelProto _EvalPartialShape(const onnx::ModelProto& input_model) {
+  onnx::ModelProto model;
+  onnx::shape_inference::DataValueMap data_map;
+  try {
+    model.CopyFrom(input_model);
+    const onnx::ShapeInferenceOptions options(/*check_type=*/false,
+                                              /*error_mode=*/0,
+                                              /*enable_data_propagation=*/true);
+    onnx::shape_inference::InferShapes(model, onnx::OpSchemaRegistry::Instance(),
+                                       options, &data_map);
+  } catch (const std::exception&) {
+    // If shape inference fails we simply have no propagated values to exploit.
+    return input_model;
+  }
+
+  if (data_map.empty()) {
+    return input_model;
+  }
+
+  const auto type_map = BuildTypeMap(model);
+
+  // Maps the output of a foldable node to the constant tensor it produces. Each
+  // such node is rewritten into a `Constant` node holding this value.
+  std::unordered_map<std::string, onnx::TensorProto> folded_values;
+
+  for (const auto& node : model.graph().node()) {
+    // Shape-family ops are single-output; only replace a node when its lone
+    // output is fully known, so dropping it can never orphan a second output.
+    if (node.output_size() != 1) {
+      continue;
+    }
+    const std::string& output = node.output(0);
+    auto data_iter = data_map.find(output);
+    if (data_iter == data_map.end()) {
+      continue;
+    }
+
+    // Every element must be statically known. Data propagation represents an
+    // unknown element as a dimension with neither dim_value nor dim_param, so
+    // requiring dim_value on every entry both proves the value is concrete and
+    // filters out activations whose rank alone is known.
+    const onnx::TensorShapeProto& value = data_iter->second;
+    bool fully_known = true;
+    std::vector<int64_t> values;
+    for (const auto& dim : value.dim()) {
+      if (!dim.has_dim_value()) {
+        fully_known = false;
+        break;
+      }
+      values.push_back(dim.dim_value());
+    }
+    if (!fully_known) {
+      continue;
+    }
+
+    // Build the constant tensor with the output's real dtype and shape. The
+    // propagated data is a flat sequence, so require a fully static shape whose
+    // element count matches what was propagated.
+    onnx::TensorProto::DataType elem_type;
+    std::vector<int64_t> dims;
+    if (!GetStaticIntTensorInfo(type_map, output, elem_type, dims)) {
+      continue;
+    }
+    int64_t element_count = 1;
+    for (int64_t d : dims) {
+      element_count *= d;
+    }
+    if (element_count != static_cast<int64_t>(values.size())) {
+      continue;
+    }
+
+    onnx::TensorProto tp;
+    tp.set_data_type(elem_type);
+    for (int64_t d : dims) {
+      tp.add_dims(d);
+    }
+    if (elem_type == onnx::TensorProto::INT64) {
+      for (int64_t v : values) {
+        tp.add_int64_data(v);
+      }
+    } else {
+      for (int64_t v : values) {
+        tp.add_int32_data(static_cast<int32_t>(v));
+      }
+    }
+    folded_values.emplace(output, std::move(tp));
+  }
+
+  if (folded_values.empty()) {
+    return input_model;
+  }
+
+  // Rewrite each foldable node into a `Constant` node in the same position,
+  // keeping the graph topologically sorted. Emitting a `Constant` node (rather
+  // than injecting an initializer) leaves the value in producer form, so the
+  // ordinary constant folder and optimizer decide how to materialize it.
+  google::protobuf::RepeatedPtrField<onnx::NodeProto> original_nodes;
+  original_nodes.Swap(model.mutable_graph()->mutable_node());
+  for (auto& node : original_nodes) {
+    auto iter = node.output_size() == 1 ? folded_values.find(node.output(0))
+                                        : folded_values.end();
+    if (iter == folded_values.end()) {
+      *model.mutable_graph()->add_node() = std::move(node);
+      continue;
+    }
+    onnx::NodeProto* constant = model.mutable_graph()->add_node();
+    constant->set_name(node.name());
+    constant->set_op_type("Constant");
+    constant->add_output(iter->first);
+    onnx::AttributeProto* attr = constant->add_attribute();
+    attr->set_name("value");
+    attr->set_type(onnx::AttributeProto::TENSOR);
+    *attr->mutable_t() = std::move(iter->second);
+  }
+  return model;
+}
+
 onnx::ModelProto _FoldConstant(const ModelExecutor& executor,
                                const onnx::ModelProto& model) {
   const auto& tmp = model;
@@ -560,7 +747,9 @@ onnx::ModelProto Simplify(
   std::function<onnx::ModelProto(const onnx::ModelProto&)> FoldConstant;
   if (constant_folding) {
     FoldConstant = [&executor](const onnx::ModelProto& model) {
-      return _FoldConstant(executor, model);
+      // Partial shape evaluation (issue #139) turns Shape/Gather-on-shape into
+      // constants that the ordinary constant folder can then propagate.
+      return _FoldConstant(executor, _EvalPartialShape(model));
     };
   } else {
     FoldConstant = Identity;

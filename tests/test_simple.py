@@ -5,7 +5,7 @@ import onnxruntime
 import onnxsim
 import os
 
-from onnx import helper, TensorProto
+from onnx import helper, numpy_helper, TensorProto
 from typing import Optional
 from onnxsim.test_utils import export_simplify_and_check_by_python_api
 
@@ -178,6 +178,72 @@ def test_ext():
         sim_model, check_ok = onnxsim.simplify(model_fn, check_n=0)
         module = None
         assert check_ok
+
+
+def _constant_value(model, name):
+    # Return the constant value produced for `name`, whether it is delivered as
+    # a graph initializer or as a Constant node's value attribute, else None.
+    for initializer in model.graph.initializer:
+        if initializer.name == name:
+            return numpy_helper.to_array(initializer)
+    for node in model.graph.node:
+        if node.op_type == "Constant" and name in node.output:
+            for attr in node.attribute:
+                if attr.name == "value":
+                    return numpy_helper.to_array(attr.t)
+    return None
+
+
+def test_partial_shape_evaluation_gather():
+    # Partial shape evaluation for https://github.com/onnxsim/onnxsim/issues/139
+    # The input's leading dimension is dynamic, but a Gather that reads only the
+    # static dimensions of its shape must still be pre-computed into a constant.
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, ["batch", 3, 4, 5])
+    g = helper.make_tensor_value_info("g", TensorProto.INT64, [3])
+    indices = helper.make_tensor("indices", TensorProto.INT64, [3], [1, 2, 3])
+    nodes = [
+        helper.make_node("Shape", ["x"], ["s"]),
+        helper.make_node("Gather", ["s", "indices"], ["g"], axis=0),
+    ]
+    graph = helper.make_graph(nodes, "g", [x], [g], initializer=[indices])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+
+    sim_model, check_ok = onnxsim.simplify(model)
+    assert check_ok
+    onnx.checker.check_model(sim_model)
+    op_types = [n.op_type for n in sim_model.graph.node]
+    # The whole Shape -> Gather chain collapses to a constant even though the
+    # batch dimension is dynamic.
+    assert "Shape" not in op_types
+    assert "Gather" not in op_types
+    value = _constant_value(sim_model, "g")
+    assert value is not None
+    assert list(value) == [3, 4, 5]
+
+
+def test_partial_shape_evaluation_keeps_dynamic_gather():
+    # A Gather that reads the dynamic dimension must NOT be folded: its value is
+    # unknown until runtime.
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, ["batch", 3, 4, 5])
+    g = helper.make_tensor_value_info("g", TensorProto.INT64, [1])
+    indices = helper.make_tensor("indices", TensorProto.INT64, [1], [0])
+    nodes = [
+        helper.make_node("Shape", ["x"], ["s"]),
+        helper.make_node("Gather", ["s", "indices"], ["g"], axis=0),
+    ]
+    graph = helper.make_graph(nodes, "g", [x], [g], initializer=[indices])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+
+    sim_model, check_ok = onnxsim.simplify(model)
+    assert check_ok
+    onnx.checker.check_model(sim_model)
+    op_types = [n.op_type for n in sim_model.graph.node]
+    # The dynamic dimension cannot be pre-computed, so the ops stay and "g" is
+    # not turned into a constant.
+    assert "Gather" in op_types
+    assert _constant_value(sim_model, "g") is None
 
 
 def test_unfoldable_const_node_keeps_topological_order():
