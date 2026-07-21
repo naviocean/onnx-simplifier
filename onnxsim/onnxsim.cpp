@@ -509,8 +509,8 @@ bool GetStaticIntTensorInfo(
 // is propagated end to end and comes out fully concrete even though the batch
 // dimension stays dynamic (the mask-rcnn pattern from issue #139).
 //
-// This pass folds every node whose lone output has a fully concrete propagated
-// value into a constant initializer. Downstream ops then fold through the
+// This pass rewrites every node whose lone output has a fully concrete
+// propagated value into a `Constant` node. Downstream ops then fold through the
 // ordinary constant folder, and now-dead nodes are removed by the optimizer.
 onnx::ModelProto _EvalPartialShape(const onnx::ModelProto& input_model) {
   onnx::ModelProto model;
@@ -533,10 +533,9 @@ onnx::ModelProto _EvalPartialShape(const onnx::ModelProto& input_model) {
 
   const auto type_map = BuildTypeMap(model);
 
-  // Node output(0) names being replaced by an initializer, plus the
-  // initializers to add.
-  std::set<std::string> replaced_outputs;
-  std::vector<onnx::TensorProto> new_initializers;
+  // Maps the output of a foldable node to the constant tensor it produces. Each
+  // such node is rewritten into a `Constant` node holding this value.
+  std::unordered_map<std::string, onnx::TensorProto> folded_values;
 
   for (const auto& node : model.graph().node()) {
     // Shape-family ops are single-output; only replace a node when its lone
@@ -568,7 +567,7 @@ onnx::ModelProto _EvalPartialShape(const onnx::ModelProto& input_model) {
       continue;
     }
 
-    // Materialize an initializer with the output's real dtype and shape. The
+    // Build the constant tensor with the output's real dtype and shape. The
     // propagated data is a flat sequence, so require a fully static shape whose
     // element count matches what was propagated.
     onnx::TensorProto::DataType elem_type;
@@ -585,7 +584,6 @@ onnx::ModelProto _EvalPartialShape(const onnx::ModelProto& input_model) {
     }
 
     onnx::TensorProto tp;
-    tp.set_name(output);
     tp.set_data_type(elem_type);
     for (int64_t d : dims) {
       tp.add_dims(d);
@@ -599,26 +597,34 @@ onnx::ModelProto _EvalPartialShape(const onnx::ModelProto& input_model) {
         tp.add_int32_data(static_cast<int32_t>(v));
       }
     }
-    new_initializers.push_back(std::move(tp));
-    replaced_outputs.insert(output);
+    folded_values.emplace(output, std::move(tp));
   }
 
-  if (replaced_outputs.empty()) {
+  if (folded_values.empty()) {
     return input_model;
   }
 
-  // Drop the replaced nodes (keeping topological order) and add the constants.
+  // Rewrite each foldable node into a `Constant` node in the same position,
+  // keeping the graph topologically sorted. Emitting a `Constant` node (rather
+  // than injecting an initializer) leaves the value in producer form, so the
+  // ordinary constant folder and optimizer decide how to materialize it.
   google::protobuf::RepeatedPtrField<onnx::NodeProto> original_nodes;
   original_nodes.Swap(model.mutable_graph()->mutable_node());
   for (auto& node : original_nodes) {
-    const bool replaced = node.output_size() == 1 &&
-                          replaced_outputs.count(node.output(0)) > 0;
-    if (!replaced) {
+    auto iter = node.output_size() == 1 ? folded_values.find(node.output(0))
+                                        : folded_values.end();
+    if (iter == folded_values.end()) {
       *model.mutable_graph()->add_node() = std::move(node);
+      continue;
     }
-  }
-  for (auto& init : new_initializers) {
-    *model.mutable_graph()->add_initializer() = std::move(init);
+    onnx::NodeProto* constant = model.mutable_graph()->add_node();
+    constant->set_name(node.name());
+    constant->set_op_type("Constant");
+    constant->add_output(iter->first);
+    onnx::AttributeProto* attr = constant->add_attribute();
+    attr->set_name("value");
+    attr->set_type(onnx::AttributeProto::TENSOR);
+    *attr->mutable_t() = std::move(iter->second);
   }
   return model;
 }
