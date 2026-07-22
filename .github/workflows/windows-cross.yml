@@ -96,6 +96,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          # Per-Python cache: setup-uv's key omits the interpreter version, so
+          # without a suffix all matrix jobs would share one blob and only one
+          # version's torch/onnxruntime wheels would be cached.
+          cache-suffix: py${{ matrix.py_ver }}
           cache-dependency-glob: |
             scripts/cross/windows-test-requirements.txt
             .github/workflows/windows-cross.yml
