@@ -14,18 +14,22 @@
 //! Simplify a model already in memory as serialized `ModelProto` bytes:
 //!
 //! ```no_run
-//! let model_bytes: Vec<u8> = std::fs::read("model.onnx")?;
-//! let simplified: Vec<u8> = onnxsim::simplify(&model_bytes)?;
-//! std::fs::write("model.opt.onnx", &simplified)?;
-//! # Ok::<(), onnxsim::Error>(())
+//! fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+//!     let model_bytes: Vec<u8> = std::fs::read("model.onnx")?;
+//!     let simplified: Vec<u8> = onnxsim::simplify(&model_bytes)?;
+//!     std::fs::write("model.opt.onnx", &simplified)?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! Or operate directly on files (lets the C++ side stream models larger than
 //! would be convenient to hold in a single buffer):
 //!
 //! ```no_run
-//! onnxsim::simplify_path("model.onnx", "model.opt.onnx")?;
-//! # Ok::<(), onnxsim::Error>(())
+//! fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+//!     onnxsim::simplify_path("model.onnx", "model.opt.onnx")?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! # Tuning
@@ -34,11 +38,13 @@
 //! passes run, and the size threshold for folded tensors:
 //!
 //! ```no_run
-//! let opts = onnxsim::Options::new()
-//!     .shape_inference(false) // some models crash ONNX shape inference
-//!     .skip_optimizer("eliminate_nop_transpose");
-//! let simplified = onnxsim::simplify_with(&std::fs::read("model.onnx")?, &opts)?;
-//! # Ok::<(), onnxsim::Error>(())
+//! fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+//!     let opts = onnxsim::Options::new()
+//!         .shape_inference(false) // some models crash ONNX shape inference
+//!         .skip_optimizer("eliminate_nop_transpose");
+//!     let simplified = onnxsim::simplify_with(&std::fs::read("model.onnx")?, &opts)?;
+//!     Ok(())
+//! }
 //! ```
 
 use std::ffi::{CStr, CString};

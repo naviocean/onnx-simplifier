@@ -30,25 +30,35 @@ In-memory (serialized `ModelProto` bytes, e.g. from the `prost`/`protobuf`
 generated ONNX types, or straight from disk):
 
 ```rust
-let model = std::fs::read("model.onnx")?;
-let simplified = onnxsim::simplify(&model)?;
-std::fs::write("model.opt.onnx", &simplified)?;
+fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+    let model = std::fs::read("model.onnx")?;
+    let simplified = onnxsim::simplify(&model)?;
+    std::fs::write("model.opt.onnx", &simplified)?;
+    Ok(())
+}
 ```
 
 File in, file out:
 
 ```rust
-onnxsim::simplify_path("model.onnx", "model.opt.onnx")?;
+fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+    onnxsim::simplify_path("model.onnx", "model.opt.onnx")?;
+    Ok(())
+}
 ```
 
 With options:
 
 ```rust
-let opts = onnxsim::Options::new()
-    .shape_inference(false)                       // skip if it crashes on your model
-    .skip_optimizer("eliminate_nop_transpose")    // keep a specific pass off
-    .tensor_size_threshold(512 * 1024 * 1024);
-let simplified = onnxsim::simplify_with(&model, &opts)?;
+fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+    let model = std::fs::read("model.onnx")?;
+    let opts = onnxsim::Options::new()
+        .shape_inference(false)                       // skip if it crashes on your model
+        .skip_optimizer("eliminate_nop_transpose")    // keep a specific pass off
+        .tensor_size_threshold(512 * 1024 * 1024);
+    let simplified = onnxsim::simplify_with(&model, &opts)?;
+    Ok(())
+}
 ```
 
 List the optimizer passes you can skip:
