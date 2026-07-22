@@ -435,6 +435,65 @@ GetConstantNodes(const onnx::ModelProto& model) {
   return {const_nodes, non_const_nodes};
 }
 
+// Recursively collect the names of every tensor consumed as a node input,
+// descending into subgraphs (e.g. the branches of "If" or the body of "Loop").
+// Because ONNX subgraphs can reference tensors from the enclosing scope, an
+// initializer in the main graph may be used only by a node inside a subgraph.
+// Collecting names recursively ensures such initializers are not mistaken for
+// unused ones (issue #174).
+void CollectUsedTensorNames(const onnx::GraphProto& graph,
+                            std::set<std::string>& used) {
+  for (const auto& node : graph.node()) {
+    for (const auto& input : node.input()) {
+      if (!input.empty()) {
+        used.insert(input);
+      }
+    }
+    for (const auto& attr : node.attribute()) {
+      if (attr.has_g()) {
+        CollectUsedTensorNames(attr.g(), used);
+      }
+      for (const auto& subgraph : attr.graphs()) {
+        CollectUsedTensorNames(subgraph, used);
+      }
+    }
+  }
+  // Graph outputs must be kept even if no node consumes them.
+  for (const auto& output : graph.output()) {
+    used.insert(output.name());
+  }
+}
+
+// Remove initializers of the main graph that are no longer referenced by any
+// node (including nodes in subgraphs). Constant folding replaces a subgraph of
+// const ops (e.g. a Transpose on a weight) with a freshly computed initializer,
+// but leaves the original operand initializers in place. Without cleanup those
+// dangling weights are duplicated in the graph, which can push the model past
+// the 2GB protobuf limit before the onnx optimizer gets a chance to remove
+// them (issue #174).
+onnx::ModelProto EliminateUnusedInitializer(const onnx::ModelProto& model) {
+  onnx::ModelProto result;
+  result.CopyFrom(model);
+
+  std::set<std::string> used;
+  CollectUsedTensorNames(result.graph(), used);
+  // Keep initializers that double as graph inputs (their default value);
+  // dropping them would silently turn them into required inputs.
+  for (const auto& input : result.graph().input()) {
+    used.insert(input.name());
+  }
+
+  google::protobuf::RepeatedPtrField<onnx::TensorProto> kept;
+  for (auto& initializer : *result.mutable_graph()->mutable_initializer()) {
+    if (used.count(initializer.name()) > 0) {
+      *kept.Add() = std::move(initializer);
+    }
+  }
+  result.mutable_graph()->mutable_initializer()->Swap(&kept);
+
+  return result;
+}
+
 onnx::ModelProto _InferShapes(const onnx::ModelProto& model) {
   onnx::ModelProto result;
   result.CopyFrom(model);
@@ -665,7 +724,9 @@ onnx::ModelProto _FoldConstant(const ModelExecutor& executor,
         *model.mutable_graph()->add_node() = std::move(node);
       }
     }
-    return model;
+    // Drop initializers left dangling by folding so the intermediate model does
+    // not balloon in size (issue #174).
+    return EliminateUnusedInitializer(model);
   }
 }
 
