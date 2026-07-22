@@ -435,11 +435,13 @@ GetConstantNodes(const onnx::ModelProto& model) {
   return {const_nodes, non_const_nodes};
 }
 
-onnx::ModelProto _InferShapes(const onnx::ModelProto& model) {
-  onnx::ModelProto result;
-  result.CopyFrom(model);
-  onnx::shape_inference::InferShapes(result);
-  return result;
+// Takes the model by value so a caller that no longer needs its copy can move
+// it in; ``onnx::shape_inference::InferShapes`` then mutates it in place, so no
+// extra ModelProto copy is made (the previous ``const&`` signature forced a
+// defensive ``CopyFrom`` because the input could not be mutated).
+onnx::ModelProto _InferShapes(onnx::ModelProto model) {
+  onnx::shape_inference::InferShapes(model);
+  return model;
 }
 
 // Build a lookup from tensor name to its type, gathering shapes from every
@@ -714,15 +716,22 @@ ModelFingerprint Fingerprint(const onnx::ModelProto& model) {
 // applied function left the model unchanged -- while roughly halving the number
 // of full model copies held at once (which matters because these fixed points
 // nest).
+// The transforms take and return the model by value, so the working model is
+// moved from one to the next (``model = f(std::move(model))``) rather than
+// copied. A transform that mutates in place (e.g. ``_InferShapes``) then makes
+// no copy at all; one that must build a fresh model (e.g. ``Optimize``, whose
+// underlying ``OptimizeFixed`` returns a new proto) is no worse than before.
+// The returned function is likewise by-value so it composes when these fixed
+// points nest.
 template <typename T>
-std::function<T(const T&)> FixedPointFn(const std::function<T(const T&)>& f1,
-                                        const std::function<T(const T&)>& f2,
-                                        size_t max_iters, bool* converged) {
-  return [f1, f2, max_iters, converged](const T& x) -> T {
+std::function<T(T)> FixedPointFn(const std::function<T(T)>& f1,
+                                 const std::function<T(T)>& f2,
+                                 size_t max_iters, bool* converged) {
+  return [f1, f2, max_iters, converged](T model) -> T {
     size_t _max_iters = max_iters;
-    T model = f1(x);
+    model = f1(std::move(model));
     ModelFingerprint fp_prev = Fingerprint(model);
-    model = f2(model);
+    model = f2(std::move(model));
     ModelFingerprint fp_cur = Fingerprint(model);
     while (_max_iters-- > 0) {
       if (fp_cur == fp_prev) {
@@ -731,7 +740,7 @@ std::function<T(const T&)> FixedPointFn(const std::function<T(const T&)>& f1,
         }
         return model;
       }
-      model = f1(model);
+      model = f1(std::move(model));
       fp_prev = fp_cur;
       fp_cur = Fingerprint(model);
       if (fp_cur == fp_prev) {
@@ -740,7 +749,7 @@ std::function<T(const T&)> FixedPointFn(const std::function<T(const T&)>& f1,
         }
         return model;
       }
-      model = f2(model);
+      model = f2(std::move(model));
       fp_prev = fp_cur;
       fp_cur = Fingerprint(model);
     }
@@ -753,13 +762,15 @@ std::function<T(const T&)> FixedPointFn(const std::function<T(const T&)>& f1,
 }
 
 template <typename T>
-std::function<T(const T&)> FixedPointFn(const std::function<T(const T&)>& f1,
-                                        const std::function<T(const T&)>& f2,
-                                        size_t max_iters) {
+std::function<T(T)> FixedPointFn(const std::function<T(T)>& f1,
+                                 const std::function<T(T)>& f2,
+                                 size_t max_iters) {
   return FixedPointFn(f1, f2, max_iters, nullptr);
 }
 
-onnx::ModelProto Identity(const onnx::ModelProto& model) { return model; }
+// By value (matching ``_InferShapes``) so it can move the model straight
+// through without copying when the caller passes an rvalue.
+onnx::ModelProto Identity(onnx::ModelProto model) { return model; }
 
 void Check(const onnx::ModelProto& model) { onnx::checker::check_model(model); }
 
@@ -789,7 +800,7 @@ onnx::ModelProto Simplify(
     config.optimizer_passes = passes;
   }
 
-  std::function<onnx::ModelProto(const onnx::ModelProto&)> FoldConstant;
+  std::function<onnx::ModelProto(onnx::ModelProto)> FoldConstant;
   if (constant_folding) {
     FoldConstant = [&executor](const onnx::ModelProto& model) {
       // Partial shape evaluation (issue #139) turns Shape/Gather-on-shape into
@@ -806,11 +817,16 @@ onnx::ModelProto Simplify(
           ? std::atoi(std::getenv("ONNXSIM_FIXED_POINT_ITERS"))
           : 50;
 
-  auto OptAndShape = FixedPointFn(std::function{InferShapes},
-                                  std::function{Optimize}, fixed_point_iters);
+  // ``Optimize`` takes ``const ModelProto&`` while the others take the model by
+  // value, so pin every transform to the same ``ModelProto(ModelProto)`` type
+  // (a by-value arg binds fine to ``Optimize``'s ``const&`` parameter) for the
+  // by-value FixedPointFn.
+  using ModelFn = std::function<onnx::ModelProto(onnx::ModelProto)>;
+  auto OptAndShape = FixedPointFn(ModelFn{InferShapes}, ModelFn{Optimize},
+                                  fixed_point_iters);
   bool converged = false;
   auto OptAndShapeAndFold =
-      FixedPointFn(std::function{OptAndShape}, std::function{FoldConstant},
+      FixedPointFn(ModelFn{OptAndShape}, ModelFn{FoldConstant},
                    fixed_point_iters, &converged);
   auto sim_model = OptAndShapeAndFold(model);
   Check(sim_model);
