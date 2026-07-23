@@ -6,6 +6,7 @@ import tempfile
 import numpy as np
 import torch
 import onnx
+import onnx.defs
 import onnxsim
 import torchvision as tv
 import pytest
@@ -700,6 +701,183 @@ def test_custom_trt_op_does_not_block_surrounding_simplification():
     op_types = [n.op_type for n in sim_model.graph.node]
     assert "Identity" not in op_types
     assert op_types.count("BatchedNMS_TRT") == 1
+
+
+def _register_custom_onnx_schema(op_type, domain, since_version=1):
+    # Register a custom operator schema in the Python ``onnx`` module the same
+    # way a user would to teach onnx about their custom operator (GitHub issue
+    # #326). The schema has a single float input/output and one optional float
+    # attribute so the round-trip through onnxsim's importer covers inputs,
+    # outputs, attributes with defaults and type constraints.
+    OpSchema = onnx.defs.OpSchema
+    schema = OpSchema(
+        op_type,
+        domain,
+        since_version,
+        inputs=[OpSchema.FormalParameter("X", "T", "the input")],
+        outputs=[OpSchema.FormalParameter("Y", "T", "the output")],
+        type_constraints=[("T", ["tensor(float)"], "Constrain to float tensors.")],
+        attributes=[
+            OpSchema.Attribute("alpha", OpSchema.AttrType.FLOAT, "slope", required=False),
+        ],
+    )
+    onnx.defs.register_schema(schema)
+
+
+def test_import_onnx_schemas_bridges_registry():
+    # A schema registered in the Python ``onnx`` module lives in a different
+    # registry from onnxsim's statically linked one. ``import_onnx_schemas``
+    # must copy it across so onnxsim's registry learns about the custom op.
+    from onnxsim import onnx_simplifier
+
+    op_type = "OnnxsimBridgeTestOp"
+    domain = "onnxsim.bridge.test"
+
+    C = onnx_simplifier.C
+    assert not C._has_schema(op_type, domain)
+
+    _register_custom_onnx_schema(op_type, domain)
+    # Registering in ``onnx`` alone must not affect onnxsim's separate registry.
+    assert not C._has_schema(op_type, domain)
+
+    imported = onnxsim.import_onnx_schemas()
+    assert imported >= 1
+    assert C._has_schema(op_type, domain)
+
+    # Idempotent: a second call imports nothing new for this op (it is already
+    # known) and does not raise.
+    onnxsim.import_onnx_schemas()
+    assert C._has_schema(op_type, domain)
+
+
+def test_custom_op_with_registered_schema_is_simplified():
+    # End-to-end: a model using a custom operator whose schema was registered via
+    # ``onnx.defs.register_schema`` must simplify successfully -- the custom op is
+    # preserved (with its attribute) and a redundant Identity feeding it is
+    # eliminated -- instead of failing validation (GitHub issue #326).
+    op_type = "OnnxsimCustomLeakyRelu"
+    domain = "onnxsim.custom.ops"
+    _register_custom_onnx_schema(op_type, domain)
+
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 3, 8, 8])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 3, 8, 8])
+    nodes = [
+        onnx.helper.make_node("Identity", ["X"], ["X_id"]),
+        onnx.helper.make_node(op_type, ["X_id"], ["Y"], domain=domain, alpha=0.1),
+    ]
+    graph = onnx.helper.make_graph(nodes, "custom_op_graph", [x], [y])
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[
+            onnx.helper.make_opsetid("", 13),
+            onnx.helper.make_opsetid(domain, 1),
+        ],
+    )
+    model.ir_version = 9
+
+    sim_model, check_ok = onnxsim.simplify(model)
+    assert check_ok
+
+    op_types = [n.op_type for n in sim_model.graph.node]
+    assert "Identity" not in op_types
+    assert op_types.count(op_type) == 1
+    custom_node = next(n for n in sim_model.graph.node if n.op_type == op_type)
+    assert custom_node.domain == domain
+    assert any(a.name == "alpha" for a in custom_node.attribute)
+
+
+def test_import_custom_schemas_can_be_disabled():
+    # ``import_custom_schemas=False`` must leave onnxsim's schema registry
+    # untouched, while the default (True) bridges the schema across.
+    from onnxsim import onnx_simplifier
+
+    C = onnx_simplifier.C
+    op_type = "OnnxsimDisableTestOp"
+    domain = "onnxsim.disable.test"
+    _register_custom_onnx_schema(op_type, domain)
+    assert not C._has_schema(op_type, domain)
+
+    # A trivial model that does not even use the custom op.
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])
+    node = onnx.helper.make_node("Relu", ["X"], ["Y"])
+    graph = onnx.helper.make_graph([node], "g", [x], [y])
+    model = onnx.helper.make_model(
+        graph, opset_imports=[onnx.helper.make_opsetid("", 13)]
+    )
+
+    # With the import disabled, onnxsim's registry stays untouched.
+    onnxsim.simplify(model, import_custom_schemas=False)
+    assert not C._has_schema(op_type, domain)
+
+    # With the import enabled (the default), the schema is bridged into onnxsim.
+    onnxsim.simplify(model)
+    assert C._has_schema(op_type, domain)
+
+
+def test_custom_op_shape_inference_via_python_trampoline():
+    # When a custom operator's Python schema carries a type/shape inference
+    # function, onnxsim registers a trampoline that runs that Python function
+    # during its own shape inference (GitHub issue #326). The distinctive
+    # intermediate dimension 99 -- taken from the ``pad`` attribute -- can only
+    # appear in ``t``'s inferred shape if the user's Python inference function
+    # actually ran inside onnxsim's shape inference.
+    op_type = "OnnxsimShapeInferOp"
+    domain = "onnxsim.infer.test"
+    OpSchema = onnx.defs.OpSchema
+    schema = OpSchema(
+        op_type,
+        domain,
+        1,
+        inputs=[OpSchema.FormalParameter("X", "T")],
+        outputs=[OpSchema.FormalParameter("Y", "T")],
+        type_constraints=[("T", ["tensor(float)"], "Constrain to float tensors.")],
+        attributes=[
+            OpSchema.Attribute("pad", OpSchema.AttrType.INT, "extra dim", required=False),
+        ],
+    )
+
+    def infer(ctx):
+        # Output type == input type with one extra trailing dimension whose size
+        # is the ``pad`` attribute.
+        output_type = onnx.TypeProto()
+        output_type.CopyFrom(ctx.get_input_type(0))
+        pad_attr = ctx.get_attribute("pad")
+        pad = pad_attr.i if pad_attr is not None else 0
+        output_type.tensor_type.shape.dim.add().dim_value = pad
+        ctx.set_output_type(0, output_type)
+
+    schema.set_type_and_shape_inference_function(infer)
+    onnx.defs.register_schema(schema)
+    try:
+        # The custom op feeds an ``Add`` (which survives simplification), so the
+        # intermediate ``t`` keeps a value_info entry whose shape is produced only
+        # by the custom operator's inference function.
+        x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [2, 3])
+        y = onnx.helper.make_tensor_value_info(
+            "Y", onnx.TensorProto.FLOAT, [2, 3, 99]
+        )
+        nodes = [
+            onnx.helper.make_node(op_type, ["X"], ["t"], domain=domain, pad=99),
+            onnx.helper.make_node("Add", ["t", "t"], ["Y"]),
+        ]
+        graph = onnx.helper.make_graph(nodes, "shape_infer_graph", [x], [y])
+        model = onnx.helper.make_model(
+            graph,
+            opset_imports=[
+                onnx.helper.make_opsetid("", 13),
+                onnx.helper.make_opsetid(domain, 1),
+            ],
+        )
+        model.ir_version = 9
+
+        sim_model, check_ok = onnxsim.simplify(model)
+        assert check_ok
+        assert _value_info_shape(sim_model, "t") == [2, 3, 99]
+    finally:
+        # Deregister the Python inference function so onnx's global registry does
+        # not segfault while tearing it down at interpreter shutdown.
+        onnx.defs.deregister_schema(op_type, 1, domain)
 
 
 def test_nameless_nodes_get_names():

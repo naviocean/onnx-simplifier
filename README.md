@@ -106,6 +106,35 @@ domain to get past validation (issues
 [#107](https://github.com/onnxsim/onnxsim/issues/107) and
 [#220](https://github.com/onnxsim/onnxsim/issues/220)).
 
+If you describe your custom operator to ONNX with
+[`onnx.defs.register_schema`](https://onnx.ai/onnx/api/defs.html), onnxsim
+picks that schema up automatically: onnxsim links its own copy of ONNX, so its
+operator registry is separate from the `onnx` Python module's, and every
+`simplify` call imports the schemas you registered into onnxsim's registry
+before validating the model (issue
+[#326](https://github.com/onnxsim/onnxsim/issues/326)). You can also trigger the
+import explicitly with `onnxsim.import_onnx_schemas()`, or turn the automatic
+import off with `onnxsim.simplify(model, import_custom_schemas=False)` (CLI:
+`--skip-schema-import`).
+
+```python
+import onnx
+import onnxsim
+
+# Teach ONNX about your custom operator.
+onnx.defs.register_schema(my_op_schema)
+
+# simplify() imports the schema into onnxsim automatically.
+model_simp, check_ok = onnxsim.simplify(model)
+```
+
+If a registered schema also has a type/shape-inference function (set via
+`onnx.defs.OpSchema.set_type_and_shape_inference_function`), onnxsim registers a
+trampoline that calls it back through `onnx.shape_inference.infer_node_outputs`
+during simplification, so the custom operator's output shapes are inferred too.
+Custom operators without an inference function are still imported; shape
+inference simply flows past them.
+
 ## Projects Using ONNX Simplifier
 
 * [MXNet](https://mxnet.apache.org/versions/1.9.1/api/python/docs/tutorials/deploy/export/onnx.html#Simplify-the-exported-ONNX-model)
