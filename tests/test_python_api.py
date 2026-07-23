@@ -818,9 +818,10 @@ def test_import_custom_schemas_can_be_disabled():
 def test_custom_op_shape_inference_via_python_trampoline():
     # When a custom operator's Python schema carries a type/shape inference
     # function, onnxsim registers a trampoline that runs that Python function
-    # during its own shape inference (GitHub issue #326). The distinctive output
-    # dimension 99 -- taken from the ``pad`` attribute -- can only appear if the
-    # user's Python inference function actually ran inside onnxsim.
+    # during its own shape inference (GitHub issue #326). The distinctive
+    # intermediate dimension 99 -- taken from the ``pad`` attribute -- can only
+    # appear in ``t``'s inferred shape if the user's Python inference function
+    # actually ran inside onnxsim's shape inference.
     op_type = "OnnxsimShapeInferOp"
     domain = "onnxsim.infer.test"
     OpSchema = onnx.defs.OpSchema
@@ -849,13 +850,18 @@ def test_custom_op_shape_inference_via_python_trampoline():
     schema.set_type_and_shape_inference_function(infer)
     onnx.defs.register_schema(schema)
     try:
+        # The custom op feeds an ``Add`` (which survives simplification), so the
+        # intermediate ``t`` keeps a value_info entry whose shape is produced only
+        # by the custom operator's inference function.
         x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [2, 3])
-        # Declare Y's element type but leave its shape for inference to fill in.
-        y = onnx.helper.make_value_info(
-            "Y", onnx.helper.make_tensor_type_proto(onnx.TensorProto.FLOAT, None)
+        y = onnx.helper.make_tensor_value_info(
+            "Y", onnx.TensorProto.FLOAT, [2, 3, 99]
         )
-        node = onnx.helper.make_node(op_type, ["X"], ["Y"], domain=domain, pad=99)
-        graph = onnx.helper.make_graph([node], "shape_infer_graph", [x], [y])
+        nodes = [
+            onnx.helper.make_node(op_type, ["X"], ["t"], domain=domain, pad=99),
+            onnx.helper.make_node("Add", ["t", "t"], ["Y"]),
+        ]
+        graph = onnx.helper.make_graph(nodes, "shape_infer_graph", [x], [y])
         model = onnx.helper.make_model(
             graph,
             opset_imports=[
@@ -867,10 +873,7 @@ def test_custom_op_shape_inference_via_python_trampoline():
 
         sim_model, check_ok = onnxsim.simplify(model)
         assert check_ok
-        out_dims = [
-            d.dim_value for d in sim_model.graph.output[0].type.tensor_type.shape.dim
-        ]
-        assert out_dims == [2, 3, 99], out_dims
+        assert _value_info_shape(sim_model, "t") == [2, 3, 99]
     finally:
         # Deregister the Python inference function so onnx's global registry does
         # not segfault while tearing it down at interpreter shutdown.
