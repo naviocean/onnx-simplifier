@@ -307,6 +307,7 @@ def simplify(
     tensor_size_threshold: str = DEFAULT_TENSOR_SIZE_THRESHOLDHOLD,
     mutable_initializer: bool = False,
     *,
+    import_custom_schemas: bool = True,
     input_shapes=None,
 ) -> Tuple[onnx.ModelProto, bool]:
     """
@@ -326,6 +327,10 @@ def simplify(
     :param custom_lib: onnxruntime custom ops's shared library
     :param include_subgraph: Simplify subgraph (e.g. true graph and false graph of "If" operator) instead of only the main graph
     :param unused_output: name of unused outputs that will be eliminated from the model
+    :param import_custom_schemas: Import operator schemas registered in the Python `onnx` module
+            (e.g. via `onnx.defs.register_schema`) into onnxsim's own registry so models using
+            custom operators pass validation. Set to False to disable this and leave onnxsim's
+            registry untouched.
     :param input_shapes: Deprecated. Please use `overwrite_input_shapes` and/or `test_input_shapes` instead.
     :return: A tuple (simplified model, success(True) or failed(False))
     """
@@ -350,7 +355,9 @@ def simplify(
     # ``onnx.defs.register_schema`` for a custom operator) into onnxsim's own
     # separately linked schema registry, so models using custom operators pass
     # validation instead of failing with "No Op registered for ..." (issue #326).
-    import_onnx_schemas()
+    # Can be turned off via ``import_custom_schemas=False``.
+    if import_custom_schemas:
+        import_onnx_schemas()
 
     if not perform_optimization:
         # None means skip all optimizers
@@ -665,6 +672,11 @@ def main():
         help="Save parameters as external data. This will make the .onnx file much smaller, but the .onnx file will depend on the external data file (.data).",
         action="store_true",
         )
+    parser.add_argument(
+        "--skip-schema-import",
+        help="By default onnxsim imports operator schemas registered in the Python 'onnx' module (e.g. via onnx.defs.register_schema) into its own registry so models with custom operators pass validation. Specify this flag to disable that import.",
+        action="store_true",
+        )
     parser.add_argument('-v', '--version', action='version', version='onnxsim ' + version.version)
 
     class ListOptimizers(argparse.Action):
@@ -814,6 +826,7 @@ def main():
         args.unused_output,
         args.tensor_size_threshold,
         args.mutable_initializer,
+        import_custom_schemas=not args.skip_schema_import,
     )
 
     try:

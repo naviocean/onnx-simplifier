@@ -786,6 +786,35 @@ def test_custom_op_with_registered_schema_is_simplified():
     assert any(a.name == "alpha" for a in custom_node.attribute)
 
 
+def test_import_custom_schemas_can_be_disabled():
+    # ``import_custom_schemas=False`` must leave onnxsim's schema registry
+    # untouched, while the default (True) bridges the schema across.
+    from onnxsim import onnx_simplifier
+
+    C = onnx_simplifier.C
+    op_type = "OnnxsimDisableTestOp"
+    domain = "onnxsim.disable.test"
+    _register_custom_onnx_schema(op_type, domain)
+    assert not C._has_schema(op_type, domain)
+
+    # A trivial model that does not even use the custom op.
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])
+    node = onnx.helper.make_node("Relu", ["X"], ["Y"])
+    graph = onnx.helper.make_graph([node], "g", [x], [y])
+    model = onnx.helper.make_model(
+        graph, opset_imports=[onnx.helper.make_opsetid("", 13)]
+    )
+
+    # With the import disabled, onnxsim's registry stays untouched.
+    onnxsim.simplify(model, import_custom_schemas=False)
+    assert not C._has_schema(op_type, domain)
+
+    # With the import enabled (the default), the schema is bridged into onnxsim.
+    onnxsim.simplify(model)
+    assert C._has_schema(op_type, domain)
+
+
 def test_perform_optimization_false():
     def _create_dummy_model():
         class MockModel(torch.nn.Module):

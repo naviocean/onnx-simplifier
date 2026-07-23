@@ -113,7 +113,9 @@ operator registry is separate from the `onnx` Python module's, and every
 `simplify` call imports the schemas you registered into onnxsim's registry
 before validating the model (issue
 [#326](https://github.com/onnxsim/onnxsim/issues/326)). You can also trigger the
-import explicitly with `onnxsim.import_onnx_schemas()`.
+import explicitly with `onnxsim.import_onnx_schemas()`, or turn the automatic
+import off with `onnxsim.simplify(model, import_custom_schemas=False)` (CLI:
+`--skip-schema-import`).
 
 ```python
 import onnx
